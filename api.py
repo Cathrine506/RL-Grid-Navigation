@@ -38,6 +38,7 @@ app = FastAPI(
     title="RL Grid Navigation API",
     description="Q-Learning agent navigation in 6x6 grid (static & dynamic environments)",
     version="1.0.0",
+    openapi_url="/openapi.json",
 )
 
 # CORS Configuration - allow requests from any origin for demo purposes
