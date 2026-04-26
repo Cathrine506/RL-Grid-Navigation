@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: rl-grid-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: MLFLOW_TRACKING_URI
+        value: mlruns
+      - key: PYTHONUNBUFFERED
+        value: "1"
+    healthCheckPath: /health
+    buildFilter:
+      paths:
+        - api.py
+        - requirements.txt
+        - q_table*.pkl
+        - Dockerfile
+
+  - type: web
+    name: rl-grid-app
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    startCommand: streamlit run app.py --server.port $PORT --server.headless true --logger.level=debug
+    envVars:
+      - key: API_URL
+        value: https://rl-grid-api.onrender.com
+      - key: PYTHONUNBUFFERED
+        value: "1"
+    buildFilter:
+      paths:
+        - app.py
+        - requirements.txt
+        - Dockerfile
