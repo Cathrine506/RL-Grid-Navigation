@@ -34,3 +34,10 @@ services:
         - app.py
         - requirements.txt
         - Dockerfile
+services:
+     - type: web
+       name: rl-grid-navigation-1
+       runtime: python
+       runtimeVersion: 3.11.9
+       buildCommand: pip install -r requirements.txt
+       startCommand: streamlit run app.py --server.port 10000 --server.address 0.0.0.0
