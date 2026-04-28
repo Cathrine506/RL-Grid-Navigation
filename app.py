@@ -12,11 +12,12 @@ import os
 # ── Config ─────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="RL Grid Navigation", page_icon="🤖", layout="wide")
 
+# Support Render deployment: API_URL from environment, fallback to localhost
 API_URL = os.getenv("API_URL", "http://localhost:8000")
 
 GRID_SIZE = 6
 GOAL = (5, 5)
-DELAY = 0.3
+DELAY = 0.25
 
 # ── Terrain ────────────────────────────────────────────────────────────────────
 TERRAIN_PRESETS = {
@@ -30,11 +31,13 @@ CELL = 72
 
 # ── Grid UI ────────────────────────────────────────────────────────────────────
 def make_grid(agent, obstacles, visited, start, terrain):
+    """Generate HTML grid visualization."""
     rows = []
     for r in range(GRID_SIZE):
         cells = []
         for c in range(GRID_SIZE):
             pos = (r, c)
+
             if pos == GOAL:
                 bg, icon = "#43A047", "🏁"
             elif pos == agent:
@@ -47,169 +50,151 @@ def make_grid(agent, obstacles, visited, start, terrain):
                 bg, icon = "#CFD8DC", terrain[pos]
             else:
                 bg, icon = "#ECEFF1", ""
+
             cells.append(
                 f'<td style="width:{CELL}px;height:{CELL}px;'
                 f'text-align:center;background:{bg};'
                 f'border:2px solid #B0BEC5;font-size:22px;">{icon}</td>'
             )
         rows.append("<tr>" + "".join(cells) + "</tr>")
+
     return '<table style="border-collapse:collapse;margin:auto;">' + "".join(rows) + "</table>"
 
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 st.sidebar.title("⚙️ Settings")
-env_choice    = st.sidebar.radio("Environment", ["dynamic", "static"])
-col1, col2    = st.sidebar.columns(2)
-start_x       = col1.number_input("Row", 0, GRID_SIZE-1, 0)
-start_y       = col2.number_input("Col", 0, GRID_SIZE-1, 0)
-terrain_name  = st.sidebar.selectbox("Terrain", list(TERRAIN_PRESETS.keys()))
-terrain       = TERRAIN_PRESETS[terrain_name]
+
+env_choice = st.sidebar.radio("Environment", ["dynamic", "static"])
+
+col1, col2 = st.sidebar.columns(2)
+start_x = col1.number_input("Row", 0, GRID_SIZE-1, 0)
+start_y = col2.number_input("Col", 0, GRID_SIZE-1, 0)
+
+terrain_name = st.sidebar.selectbox("Terrain", list(TERRAIN_PRESETS.keys()))
+terrain = TERRAIN_PRESETS[terrain_name]
+
 num_obstacles = st.sidebar.slider("Obstacles", 1, 4, 2)
 
-# Known static path — obstacles must never be placed on these cells
-STATIC_PATH = {(0,0),(1,0),(1,1),(1,2),(2,2),(3,2),(4,2),(4,3),(4,4),(5,4),(5,5)}
-
-def generate_obstacles(n, start, avoid_static_path=False):
+# ── Auto obstacle generator ─────────────────────────────────────────────────────
+def generate_obstacles(n, start):
+    """Generate random obstacles avoiding start and goal."""
     obs = set()
-    blocked = {start, GOAL}
-    if avoid_static_path:
-        blocked |= STATIC_PATH
     while len(obs) < n:
         pos = (random.randint(0, GRID_SIZE-1), random.randint(0, GRID_SIZE-1))
-        if pos not in blocked:
+        if pos != start and pos != GOAL:
             obs.add(pos)
     return list(obs)
 
-# ── Session state init ─────────────────────────────────────────────────────────
-for key, val in {
-    "animating": False,
-    "frame": 0,
-    "path": [],
-    "extra_obs": [],
-    "visited": [],
-    "api_data": None,
-    "start": (0, 0),
-    "terrain_snap": {},
-    "env_snap": "dynamic",
-}.items():
-    if key not in st.session_state:
-        st.session_state[key] = val
-
-# ── UI ─────────────────────────────────────────────────────────────────────────
+# ── UI Header ───────────────────────────────────────────────────────────────────
 st.title("🤖 RL Grid Navigation")
 st.caption(f"{terrain_name} | {env_choice} | {num_obstacles} obstacles")
 
+# Debug info: show which API we're connecting to
 with st.sidebar.expander("🔧 Debug", expanded=False):
     st.code(f"API_URL={API_URL}", language="bash")
+    st.info(f"**API Status**: Checking {API_URL}/health")
 
-run_btn   = st.button("▶ Run Agent", type="primary", disabled=st.session_state.animating)
-grid_ph   = st.empty()
+run_btn = st.button("▶ Run Agent", type="primary")
+
+grid_ph = st.empty()
 status_ph = st.empty()
 
-# ── Button pressed — fetch path from API ───────────────────────────────────────
+# ── Initial grid ────────────────────────────────────────────────────────────────
+def show_idle():
+    """Display initial state."""
+    obs = generate_obstacles(num_obstacles, (start_x, start_y))
+    html = make_grid((start_x, start_y), obs, set(), (start_x, start_y), terrain)
+    grid_ph.markdown(html, unsafe_allow_html=True)
+
+show_idle()
+
+# ── Run agent ───────────────────────────────────────────────────────────────────
 if run_btn:
     if (start_x, start_y) == GOAL:
         st.error("❌ Start cannot equal goal")
         st.stop()
 
-    obstacles = generate_obstacles(num_obstacles, (start_x, start_y), avoid_static_path=(env_choice == "static"))
-    ox, oy = obstacles[0]
+    obstacles = generate_obstacles(num_obstacles, (start_x, start_y))
+    ox, oy = obstacles[0]  # API uses only one obstacle
 
     payload = {
-        "start_x": start_x, "start_y": start_y,
-        "obstacle_x": ox,   "obstacle_y": oy,
+        "start_x": start_x,
+        "start_y": start_y,
+        "obstacle_x": ox,
+        "obstacle_y": oy,
         "env": env_choice,
     }
 
     try:
-        status_ph.info("🔄 Fetching path...")
-        res = requests.post(f"{API_URL}/predict", json=payload, timeout=30)
+        status_ph.info("🔄 Running agent...")
+        t0 = time.perf_counter()
+        res = requests.post(
+            f"{API_URL}/predict",
+            json=payload,
+            timeout=30,
+            verify=True
+        )
         res.raise_for_status()
+        client_ms = (time.perf_counter() - t0) * 1000
+        status_ph.empty()
+
         data = res.json()
+        path = data["path"]
+        steps = data["steps"]
 
-        st.session_state.animating   = True
-        st.session_state.frame       = 0
-        st.session_state.path        = data["path"]
-        st.session_state.extra_obs   = [list(o) for o in obstacles[1:]]
-        st.session_state.visited     = []
-        st.session_state.api_data    = data
-        st.session_state.start       = (start_x, start_y)
-        st.session_state.terrain_snap = terrain
-        st.session_state.env_snap    = env_choice
-        status_ph.empty()
-        st.rerun()
+        visited = set()
 
-    except requests.exceptions.ConnectionError:
-        st.error(f"❌ Cannot reach API at `{API_URL}`. Start with: `uvicorn api:app --reload`")
-    except requests.exceptions.Timeout:
-        st.error("❌ API timed out. Render free tier may be spinning up — try again.")
-    except requests.exceptions.HTTPError as e:
-        st.error(f"❌ API Error ({e.response.status_code}): {e.response.text}")
-    except Exception as e:
-        st.error(f"❌ {type(e).__name__}: {e}")
+        # Extra obstacles (beyond the one tracked by the API) stay fixed for display
+        extra_obs = set(tuple(o) for o in obstacles[1:])
 
-# ── Animation loop — one frame per rerun ──────────────────────────────────────
-elif st.session_state.animating:
-    path      = st.session_state.path
-    frame     = st.session_state.frame
-    extra_obs = set(tuple(o) for o in st.session_state.extra_obs)
-    _start    = st.session_state.start
-    _terrain  = st.session_state.terrain_snap
+        # Animate path — run outside st.spinner so each frame renders immediately
+        for step in path:
+            agent = tuple(step["agent"])
+            obs = set([tuple(step["obstacle"])]) if step.get("obstacle") else set()
+            obs = obs | extra_obs  # combine moving obstacle with extra static ones
 
-    if frame < len(path):
-        step    = path[frame]
-        agent   = tuple(step["agent"])
-        obs     = set([tuple(step["obstacle"])]) if step.get("obstacle") else set()
-        obs     = obs | extra_obs
+            visited.add(agent)
 
-        st.session_state.visited.append(list(agent))
-        visited = set(tuple(v) for v in st.session_state.visited[:-1])
+            html = make_grid(agent, obs, visited - {agent}, (start_x, start_y), terrain)
+            grid_ph.markdown(html, unsafe_allow_html=True)
+            time.sleep(DELAY)
 
-        html = make_grid(agent, obs, visited, _start, _terrain)
-        grid_ph.markdown(html, unsafe_allow_html=True)
-        status_ph.info(f"Step {frame + 1} / {len(path)}")
-
-        st.session_state.frame += 1
-        time.sleep(DELAY)
-        st.rerun()
-
-    else:
-        # Animation done — show final state
-        data    = st.session_state.api_data
-        path    = st.session_state.path
-        visited = set(tuple(v) for v in st.session_state.visited)
-
-        last    = path[-1]
-        agent   = tuple(last["agent"])
-        obs     = set([tuple(last["obstacle"])]) if last.get("obstacle") else set()
-        obs     = obs | set(tuple(o) for o in st.session_state.extra_obs)
-
-        html = make_grid(agent, obs, visited - {agent}, st.session_state.start, st.session_state.terrain_snap)
-        grid_ph.markdown(html, unsafe_allow_html=True)
-        status_ph.empty()
-
-        st.session_state.animating = False
-
+        # ── Metrics (AUTO SHOWN) ───────────────────────────────────────────────
         st.markdown("### 📊 Agent Metrics")
         c1, c2, c3 = st.columns(3)
-        c1.metric("Steps",   data["steps"])
-        c2.metric("Result",  "✅ Success" if data["success"] else "❌ Failed")
+        c1.metric("Steps", steps)
+        c2.metric("Result", "✅ Success" if data["success"] else "❌ Failed")
         c3.metric("Latency", f"{data['latency_ms']:.1f} ms")
 
+        # ── Status ─────────────────────────────────────────────────────────────
         if data["hit_obstacle"]:
-            st.warning("💣 Hit obstacle!")
+            status_ph.warning("💣 Hit obstacle!")
         elif data["success"]:
             st.balloons()
-            st.success("🏆 Goal reached!")
+            status_ph.success("🏆 Goal reached!")
         else:
-            st.error("❌ Failed to reach goal")
+            status_ph.error("❌ Failed to reach goal")
 
+        # ── Path log ───────────────────────────────────────────────────────────
         with st.expander("📋 Path Details"):
             for s in path:
                 st.text(f"Step {s['step']} → {s['agent']} ({s['action']})")
 
-# ── Idle — show initial grid ───────────────────────────────────────────────────
-else:
-    obs  = generate_obstacles(num_obstacles, (start_x, start_y), avoid_static_path=(env_choice == "static"))
-    html = make_grid((start_x, start_y), set(obs), set(), (start_x, start_y), terrain)
-    grid_ph.markdown(html, unsafe_allow_html=True)
+    except requests.exceptions.ConnectionError as e:
+        st.error(
+            f"❌ **Connection Error**\n\n"
+            f"Cannot reach API at: `{API_URL}`\n\n"
+            f"**Local setup:** Start FastAPI with:\n"
+            f"```bash\nuvicorn api:app --reload\n```\n\n"
+            f"**Render deployment:** Check that the API service is running and the URL is correct."
+        )
+    except requests.exceptions.Timeout:
+        st.error(
+            f"❌ **Timeout**\n\n"
+            f"API at `{API_URL}` took too long to respond.\n\n"
+            f"If using Render free tier, the service may have been spun down."
+        )
+    except requests.exceptions.HTTPError as e:
+        st.error(f"❌ **API Error** ({e.response.status_code})\n\n{e.response.text}")
+    except Exception as e:
+        st.error(f"❌ **Unexpected Error**\n\n{type(e).__name__}: {str(e)}")
