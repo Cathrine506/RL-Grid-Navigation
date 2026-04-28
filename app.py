@@ -126,16 +126,17 @@ if run_btn:
     }
 
     try:
-        with st.spinner("🔄 Running agent..."):
-            t0 = time.perf_counter()
-            res = requests.post(
-                f"{API_URL}/predict",
-                json=payload,
-                timeout=30,
-                verify=True
-            )
-            res.raise_for_status()
-            client_ms = (time.perf_counter() - t0) * 1000
+        status_ph.info("🔄 Running agent...")
+        t0 = time.perf_counter()
+        res = requests.post(
+            f"{API_URL}/predict",
+            json=payload,
+            timeout=30,
+            verify=True
+        )
+        res.raise_for_status()
+        client_ms = (time.perf_counter() - t0) * 1000
+        status_ph.empty()
 
         data = res.json()
         path = data["path"]
@@ -146,7 +147,7 @@ if run_btn:
         # Extra obstacles (beyond the one tracked by the API) stay fixed for display
         extra_obs = set(tuple(o) for o in obstacles[1:])
 
-        # Animate path
+        # Animate path — run outside st.spinner so each frame renders immediately
         for step in path:
             agent = tuple(step["agent"])
             obs = set([tuple(step["obstacle"])]) if step.get("obstacle") else set()
