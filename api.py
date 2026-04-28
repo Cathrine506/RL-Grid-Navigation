@@ -41,7 +41,7 @@ app = FastAPI(
     openapi_url="/openapi.json",
 )
 
-# CORS Configuration - allow requests from any origin for demo purposes
+# CORS Configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -50,7 +50,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Environment constants ──────────────────────────────────────────────────────
+# ── Constants ──────────────────────────────────────────────────────────────────
 GRID_SIZE = 6
 GOAL = (5, 5)
 ACTIONS = ["up", "down", "left", "right"]
@@ -63,7 +63,6 @@ ACTION_MAP = {
 
 # ── Load Q-tables ──────────────────────────────────────────────────────────────
 def load_q_table(filename: str) -> dict:
-    """Load Q-table from pickle file. Returns empty dict if file not found."""
     try:
         if os.path.exists(filename):
             with open(filename, "rb") as f:
@@ -80,14 +79,13 @@ def load_q_table(filename: str) -> dict:
 Q_STATIC  = load_q_table("q_table.pkl")
 Q_DYNAMIC = load_q_table("q_table_dynamic.pkl")
 
-# ── Inference telemetry (in-memory) ───────────────────────────────────────────
+# ── Telemetry ─────────────────────────────────────────────────────────────────
 _call_count   = 0
 _total_latency = 0.0
-_drift_log: List[dict] = []          # last 100 inference results for drift detection
+_drift_log: List[dict] = []
 
-# ── Helper functions ───────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 def next_state(state: tuple, action: str) -> tuple:
-    """Get next state given action, staying in bounds."""
     dx, dy = ACTION_MAP[action]
     ns = (state[0] + dx, state[1] + dy)
     if 0 <= ns[0] < GRID_SIZE and 0 <= ns[1] < GRID_SIZE:
@@ -96,7 +94,6 @@ def next_state(state: tuple, action: str) -> tuple:
 
 
 def move_obstacle(obstacle: tuple) -> tuple:
-    """Move obstacle randomly, staying in bounds."""
     moves = [(0, 1), (0, -1), (1, 0), (-1, 0)]
     dx, dy = random.choice(moves)
     np_ = (obstacle[0] + dx, obstacle[1] + dy)
@@ -106,17 +103,30 @@ def move_obstacle(obstacle: tuple) -> tuple:
 
 
 def best_action(Q: dict, state: tuple) -> str:
-    """Select best action from Q-table using greedy policy."""
     actions = Q.get(state, {a: 0.0 for a in ACTIONS})
     return max(actions, key=actions.get)
 
-# ── Pydantic models ────────────────────────────────────────────────────────────
+
+# ✅ NEW SAFE ACTION (added fix)
+def safe_action(Q: dict, state: tuple, agent: tuple, obstacle: Optional[tuple]) -> str:
+    actions = Q.get(state, {a: 0.0 for a in ACTIONS})
+    sorted_actions = sorted(actions, key=actions.get, reverse=True)
+
+    for act in sorted_actions:
+        next_pos = next_state(agent, act)
+        if not obstacle or next_pos != obstacle:
+            return act
+
+    return sorted_actions[0]
+
+
+# ── Models ────────────────────────────────────────────────────────────────────
 class PredictRequest(BaseModel):
     start_x: int = 0
     start_y: int = 0
     obstacle_x: Optional[int] = 2
     obstacle_y: Optional[int] = 2
-    env: str = "dynamic"          # "static" or "dynamic"
+    env: str = "dynamic"
 
     @field_validator("start_x", "start_y")
     @classmethod
@@ -152,10 +162,10 @@ class PredictResponse(BaseModel):
     latency_ms: float
     timestamp: str
 
+
 # ── Routes ─────────────────────────────────────────────────────────────────────
 @app.get("/")
 def root():
-    """Root endpoint – API info."""
     return {
         "message": "RL Grid Navigation API is running",
         "docs": "/docs",
@@ -166,7 +176,6 @@ def root():
 
 @app.get("/health")
 def health():
-    """Liveness probe – used by Docker / monitoring systems."""
     return {
         "status": "ok",
         "q_table_static_states":  len(Q_STATIC),
@@ -178,18 +187,10 @@ def health():
 
 @app.post("/predict", response_model=PredictResponse)
 def predict(req: PredictRequest):
-    """
-    Run a single episode from start position using the trained Q-table.
 
-    - **start_x / start_y**: agent starting cell (0-5)
-    - **obstacle_x / obstacle_y**: initial obstacle position (dynamic env only)
-    - **env**: "static" (no obstacle) or "dynamic" (moving obstacle)
-    """
     global _call_count, _total_latency
-
     t0 = time.perf_counter()
 
-    # --- validate start != goal ---
     if (req.start_x, req.start_y) == GOAL:
         raise HTTPException(status_code=400, detail="Start position equals goal position.")
 
@@ -203,12 +204,21 @@ def predict(req: PredictRequest):
     hit_obstacle  = False
 
     for step in range(50):
-        state  = (agent, obstacle) if req.env == "dynamic" else agent
-        action = best_action(Q, state)
 
-        agent = next_state(agent, action)
+        # ✅ FIX 1: move obstacle FIRST
         if obstacle:
             obstacle = move_obstacle(obstacle)
+
+        # state AFTER obstacle moves
+        state = (agent, obstacle) if req.env == "dynamic" else agent
+
+        # ✅ FIX 2: safe action
+        if req.env == "dynamic":
+            action = safe_action(Q, state, agent, obstacle)
+        else:
+            action = best_action(Q, state)
+
+        agent = next_state(agent, action)
 
         path.append(StepRecord(
             step=step + 1,
@@ -226,34 +236,19 @@ def predict(req: PredictRequest):
 
     latency_ms = (time.perf_counter() - t0) * 1000
 
-    # --- telemetry ---
     _call_count    += 1
     _total_latency += latency_ms
 
-    result_record = {
-        "ts":          datetime.utcnow().isoformat(),
-        "env":         req.env,
-        "start":       [req.start_x, req.start_y],
-        "steps":       len(path),
-        "success":     reached_goal,
-        "latency_ms":  latency_ms,
-    }
-    _drift_log.append(result_record)
+    _drift_log.append({
+        "ts": datetime.utcnow().isoformat(),
+        "env": req.env,
+        "steps": len(path),
+        "success": reached_goal,
+        "latency_ms": latency_ms,
+    })
+
     if len(_drift_log) > 200:
         _drift_log.pop(0)
-
-    logger.info(
-        f"inference | env={req.env} start=({req.start_x},{req.start_y}) steps={len(path)} success={reached_goal} latency={latency_ms:.1f}ms"
-    )
-
-    # --- optional MLflow logging ---
-    if MLFLOW_ENABLED:
-        try:
-            with mlflow.start_run(run_name=f"inference_{_call_count}", nested=True):
-                mlflow.log_params({"env": req.env, "start": f"({req.start_x},{req.start_y})"})
-                mlflow.log_metrics({"steps": len(path), "success": int(reached_goal), "latency_ms": latency_ms})
-        except Exception as e:
-            logger.debug(f"MLflow logging skipped: {e}")
 
     return PredictResponse(
         env=req.env,
@@ -271,50 +266,30 @@ def predict(req: PredictRequest):
 
 @app.get("/metrics")
 def metrics():
-    """Aggregated runtime metrics & drift signal."""
     if not _drift_log:
         return {"message": "No inferences recorded yet."}
 
-    recent = _drift_log[-50:]          # last 50 calls
+    recent = _drift_log[-50:]
     success_rate = sum(r["success"] for r in recent) / len(recent)
-    avg_steps    = sum(r["steps"]   for r in recent) / len(recent)
+    avg_steps    = sum(r["steps"] for r in recent) / len(recent)
     avg_latency  = sum(r["latency_ms"] for r in recent) / len(recent)
 
-    # Simple drift flag: success rate drop below 50%
-    drift_detected = success_rate < 0.50
-
     return {
-        "total_inferences":       _call_count,
-        "recent_window":          len(recent),
-        "success_rate":           round(success_rate, 3),
-        "avg_steps":              round(avg_steps, 2),
-        "avg_latency_ms":         round(avg_latency, 2),
-        "drift_detected":         drift_detected,
-        "drift_threshold":        0.50,
-        "q_table_static_states":  len(Q_STATIC),
-        "q_table_dynamic_states": len(Q_DYNAMIC),
+        "success_rate": round(success_rate, 3),
+        "avg_steps": round(avg_steps, 2),
+        "avg_latency_ms": round(avg_latency, 2),
     }
 
 
 @app.get("/model-info")
 def model_info():
-    """Describe the trained models."""
     return {
-        "model_type":       "Tabular Q-Learning",
-        "grid_size":        f"{GRID_SIZE}x{GRID_SIZE}",
-        "start":            "(0,0)",
-        "goal":             str(GOAL),
-        "actions":          ACTIONS,
-        "static_episodes":  500,
-        "dynamic_episodes": 3000,
-        "hyperparameters": {
-            "alpha":   0.1,
-            "gamma":   0.9,
-            "epsilon": "0.2 (static) / decaying 1→0.1 (dynamic)",
-        },
-        "q_table_static_states":  len(Q_STATIC),
-        "q_table_dynamic_states": len(Q_DYNAMIC),
+        "model_type": "Tabular Q-Learning",
+        "grid_size": f"{GRID_SIZE}x{GRID_SIZE}",
+        "goal": str(GOAL),
+        "actions": ACTIONS,
     }
+
 
 if __name__ == "__main__":
     import uvicorn
