@@ -40,10 +40,8 @@ def make_grid(agent, obstacles, visited, start, terrain):
 
             if pos == GOAL:
                 bg, icon = "#43A047", "🏁"
-            elif pos == start:
-                bg, icon = "#1565C0", "🚀"
             elif pos == agent:
-                bg, icon = "#FF8F00", "🤖"
+                bg, icon = "#1565C0", "🚀"
             elif pos in obstacles:
                 bg, icon = "#C62828", "💣"
             elif pos in visited:
@@ -145,10 +143,14 @@ if run_btn:
 
         visited = set()
 
+        # Extra obstacles (beyond the one tracked by the API) stay fixed for display
+        extra_obs = set(tuple(o) for o in obstacles[1:])
+
         # Animate path
         for step in path:
             agent = tuple(step["agent"])
             obs = set([tuple(step["obstacle"])]) if step.get("obstacle") else set()
+            obs = obs | extra_obs  # combine moving obstacle with extra static ones
 
             visited.add(agent)
 
