@@ -165,6 +165,7 @@ if run_btn:
         st.error(f"❌ {type(e).__name__}: {e}")
 
 # ── Animation: one frame per rerun ────────────────────────────────────────────
+# ── Animation: one frame per rerun ────────────────────────────────────────────
 elif st.session_state.animating and st.session_state.path:
     path  = st.session_state.path
     frame = st.session_state.frame
@@ -177,9 +178,15 @@ elif st.session_state.animating and st.session_state.path:
             obs.add(tuple(step["obstacle"]))
         obs.update(st.session_state.extra_obs)
 
+        # Update visited set and add current agent position
+        if frame > 0:
+            prev_step = path[frame-1]
+            st.session_state.visited.add(tuple(prev_step["agent"]))
+        
         st.session_state.visited.add(agent)
         trail = st.session_state.visited - {agent}
 
+        # Display current frame
         grid_ph.markdown(
             make_grid(agent, obs, trail, st.session_state.terrain),
             unsafe_allow_html=True,
@@ -188,6 +195,7 @@ elif st.session_state.animating and st.session_state.path:
             f"Step **{frame + 1}** / {len(path)} — action: **{step['action']}**"
         )
 
+        # Advance frame counter
         st.session_state.frame += 1
         time.sleep(DELAY)
         st.rerun()  # render next frame
