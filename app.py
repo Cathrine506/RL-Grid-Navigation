@@ -64,7 +64,13 @@ def make_grid(agent, obstacles, visited, terrain):
         cells = []
         for c in range(GRID_SIZE):
             pos = (r, c)
-            if pos == GOAL and pos == agent:
+            
+            # ✅ Check for collision (agent and obstacle at same position)
+            collision = (pos == agent and pos in obstacles)
+            
+            if collision:
+                bg, icon = "#FF1744", "💥"  # Red flash for collision
+            elif pos == GOAL and pos == agent:
                 bg, icon = "#43A047", "🏁🚀"
             elif pos == GOAL:
                 bg, icon = "#43A047", "🏁"
@@ -78,18 +84,32 @@ def make_grid(agent, obstacles, visited, terrain):
                 bg, icon = "#CFD8DC", terrain[pos]
             else:
                 bg, icon = "#ECEFF1", ""
+                
             cells.append(
                 f'<td style="width:{CELL}px;height:{CELL}px;text-align:center;'
-                f'background:{bg};border:2px solid #B0BEC5;font-size:22px;">'
+                f'background:{bg};border:2px solid #B0BEC5;font-size:22px;'
+                f'{"animation: flash 0.5s infinite;" if collision else ""}">'
                 f'{icon}</td>'
             )
         rows.append("<tr>" + "".join(cells) + "</tr>")
+    
+    # Add CSS animation for collision effect
+    style = """
+    <style>
+        @keyframes flash {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+    </style>
+    """ if any(pos == agent and pos in obstacles for pos in [(r,c) for r in range(GRID_SIZE) for c in range(GRID_SIZE)]) else ""
+    
     return (
+        style +
         '<table style="border-collapse:collapse;margin:auto;">'
         + "".join(rows)
         + "</table>"
     )
-
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def generate_obstacles(n, start):
     obs = set()
@@ -219,6 +239,7 @@ if run_btn:
         st.error(f"❌ {type(e).__name__}: {e}")
 
 # ── Animation: one frame per rerun ────────────────────────────────────────────
+# ── Animation: one frame per rerun ────────────────────────────────────────────
 elif st.session_state.animating and st.session_state.path:
     path = st.session_state.path
     frame = st.session_state.frame
@@ -241,6 +262,9 @@ elif st.session_state.animating and st.session_state.path:
             prev_step = path[frame - 1]
             st.session_state.visited.add(tuple(prev_step["agent"]))
         
+        # ✅ Check if this step hit obstacle
+        is_collision = "hit obstacle" in step.get("action", "").lower() or "💥" in step.get("action", "")
+        
         # Update session state
         st.session_state.agent_pos = agent
         st.session_state.obstacles_pos = obs
@@ -248,19 +272,33 @@ elif st.session_state.animating and st.session_state.path:
         st.session_state.current_action = step["action"]
         
         # Render current state
-        trail = st.session_state.visited - {agent}  # Don't show trail on agent
-        grid_ph.markdown(
-            make_grid(agent, obs, trail, st.session_state.terrain),
-            unsafe_allow_html=True,
-        )
+        trail = st.session_state.visited - {agent}
         
-        status_ph.info(
-            f"🚀 Step **{frame + 1}** / {len(path)}  |  "
-            f"Position: {agent}  |  "
-            f"Action: **{step['action']}**"
-        )
+        # ✅ SHOW COLLISION EFFECT
+        if is_collision:
+            # Flash effect - show agent and obstacle at same position
+            # Merge agent and obstacle for visual overlap
+            grid_ph.markdown(
+                make_grid(agent, obs.union({agent}), trail, st.session_state.terrain),
+                unsafe_allow_html=True,
+            )
+            status_ph.error(
+                f"💥 **COLLISION!** Step {frame + 1} | "
+                f"Agent at {agent} | "
+                f"Obstacle at {obstacle if obstacle else 'unknown'}"
+            )
+        else:
+            grid_ph.markdown(
+                make_grid(agent, obs, trail, st.session_state.terrain),
+                unsafe_allow_html=True,
+            )
+            status_ph.info(
+                f"🚀 Step **{frame + 1}** / {len(path)}  |  "
+                f"Position: {agent}  |  "
+                f"Action: **{step['action']}**"
+            )
         
-        # Show progress bar
+        # Show progress
         progress = (frame + 1) / len(path)
         st.progress(progress)
         
@@ -287,45 +325,67 @@ elif st.session_state.animating and st.session_state.path:
         
         st.session_state.visited.add(final_agent)
         
-        grid_ph.markdown(
-            make_grid(final_agent, obs, st.session_state.visited - {final_agent}, 
-                     st.session_state.terrain),
-            unsafe_allow_html=True,
-        )
+        # ✅ Check if ended with collision
+        if data.get("hit_obstacle"):
+            # Show collision in final frame
+            grid_ph.markdown(
+                make_grid(final_agent, obs.union({final_agent}), 
+                         st.session_state.visited - {final_agent}, 
+                         st.session_state.terrain),
+                unsafe_allow_html=True,
+            )
+        else:
+            grid_ph.markdown(
+                make_grid(final_agent, obs, 
+                         st.session_state.visited - {final_agent}, 
+                         st.session_state.terrain),
+                unsafe_allow_html=True,
+            )
         
         # Metrics
         st.markdown("---")
         st.markdown("### 📊 Results")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Steps", data["steps"])
-        c2.metric("Result", "✅ Success" if data["success"] else "❌ Failed")
+        c2.metric("Env", data["env"])
         c3.metric("Latency", f"{data['latency_ms']:.1f} ms")
-        c4.metric("Env", data["env"])
         
         if data["hit_obstacle"]:
-            status_ph.warning("💣 Hit obstacle!")
+            c4.metric("Result", "💥 Collision!")
+            status_ph.error("💥 Agent hit an obstacle! Episode ended.")
+            st.warning("🚨 The agent collided with a moving obstacle. Try running again!")
         elif data["success"]:
+            c4.metric("Result", "✅ Success")
             st.balloons()
             status_ph.success("🏆 Goal reached successfully!")
         else:
+            c4.metric("Result", "❌ Failed")
             status_ph.error("❌ Failed to reach goal in 50 steps")
         
+        # Show path with collision highlighted
         with st.expander("📋 Full Path Details"):
             st.write(f"Start: {data['start']} → Goal: {data['goal']}")
             for s in path:
-                st.text(
-                    f"Step {s['step']:2d} | "
-                    f"Agent: ({s['agent'][0]},{s['agent'][1]}) | "
-                    f"Obstacle: {s.get('obstacle', 'N/A')} | "
-                    f"Action: {s['action']}"
-                )
+                if "hit obstacle" in s.get('action', '').lower() or "💥" in s.get('action', ''):
+                    st.error(
+                        f"💥 Step {s['step']:2d} | "
+                        f"Agent: ({s['agent'][0]},{s['agent'][1]}) | "
+                        f"Obstacle: {s.get('obstacle', 'N/A')} | "
+                        f"Action: {s['action']}"
+                    )
+                else:
+                    st.text(
+                        f"Step {s['step']:2d} | "
+                        f"Agent: ({s['agent'][0]},{s['agent'][1]}) | "
+                        f"Obstacle: {s.get('obstacle', 'N/A')} | "
+                        f"Action: {s['action']}"
+                    )
         
-        # Keep the animation state but allow new run
+        # Reset button
         if st.button("🔄 Run Again", type="primary"):
             st.session_state.animating = False
             st.session_state.path = None
             st.rerun()
-
 # ── Idle state: show initial grid ─────────────────────────────────────────────
 else:
     # Reset animation state when idle

@@ -234,7 +234,6 @@ def predict(req: PredictRequest):
     hit_obstacle  = False
 
     for step in range(50):
-
         # ✅ FIX 1: move obstacle FIRST
         if obstacle:
             obstacle = move_obstacle(obstacle)
@@ -244,7 +243,7 @@ def predict(req: PredictRequest):
 
         # ✅ FIX 2: Smarter action selection with exploration
         import random
-        if random.random() < 0.1:  # 10% exploration
+        if random.random() < 0.05:  # Reduced to 5% exploration since we have trained tables
             # Try random action that actually moves the agent
             valid_moves = [a for a in ACTIONS if next_state(agent, a) != agent]
             if valid_moves:
@@ -257,10 +256,25 @@ def predict(req: PredictRequest):
             else:
                 action = best_action(Q, state)
 
-        # Debug log to see what's happening
-        logger.info(f"Step {step+1}: agent={agent}, action={action}, next={next_state(agent, action)}, obstacle={obstacle}")
-
-        agent = next_state(agent, action)
+        next_pos = next_state(agent, action)
+        
+        # ✅ FIX 3: CHECK FOR OBSTACLE COLLISION BEFORE MOVING
+        if obstacle and next_pos == obstacle:
+            # Agent hit obstacle - don't move, record collision
+            hit_obstacle = True
+            action = f"{action} (💥 hit obstacle)"
+            
+            # Add final step record showing collision
+            path.append(StepRecord(
+                step=step + 1,
+                agent=list(agent),  # Stay at current position
+                obstacle=list(obstacle),
+                action=action,
+            ))
+            break  # End episode
+        
+        # ✅ Move agent if safe
+        agent = next_pos
 
         path.append(StepRecord(
             step=step + 1,
@@ -269,11 +283,11 @@ def predict(req: PredictRequest):
             action=action,
         ))
 
+        # Debug log
+        logger.info(f"Step {step+1}: agent={agent}, action={action}, obstacle={obstacle}")
+
         if agent == GOAL:
             reached_goal = True
-            break
-        if obstacle and agent == obstacle:
-            hit_obstacle = True
             break
 
     latency_ms = (time.perf_counter() - t0) * 1000
