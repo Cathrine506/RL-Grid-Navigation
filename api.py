@@ -60,7 +60,9 @@ ACTION_MAP = {
     "left":  ( 0, -1),
     "right": ( 0,  1),
 }
-
+def manhattan_distance(pos1: tuple, pos2: tuple) -> int:
+    """Calculate Manhattan distance between two points"""
+    return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
 # ── Load Q-tables ──────────────────────────────────────────────────────────────
 def load_q_table(filename: str) -> dict:
     try:
@@ -232,48 +234,101 @@ def predict(req: PredictRequest):
     path: List[StepRecord] = []
     reached_goal  = False
     hit_obstacle  = False
+    visited_states = set()  # Track visited states to prevent looping
 
     for step in range(50):
-        # ✅ FIX 1: move obstacle FIRST
+        # ✅ Move obstacle first
         if obstacle:
             obstacle = move_obstacle(obstacle)
 
-        # state AFTER obstacle moves
+        # State after obstacle moves
         state = (agent, obstacle) if req.env == "dynamic" else agent
 
-        # ✅ FIX 2: Smarter action selection with exploration
-        import random
-        if random.random() < 0.05:  # Reduced to 5% exploration since we have trained tables
-            # Try random action that actually moves the agent
-            valid_moves = [a for a in ACTIONS if next_state(agent, a) != agent]
-            if valid_moves:
-                action = random.choice(valid_moves)
-            else:
-                action = random.choice(ACTIONS)
+        # ✅ SMART ACTION SELECTION
+        if req.env == "dynamic":
+            # Try Q-table first
+            action = safe_action(Q, state, agent, obstacle)
+            
+            # Get next position
+            next_pos = next_state(agent, action)
+            
+            # ANTI-LOOP: If action leads to recently visited state, try alternatives
+            if next_pos in visited_states:
+                # Try all actions, find best that leads to new state
+                all_actions = list(ACTIONS)
+                random.shuffle(all_actions)
+                
+                best_new_action = action  # Keep original as fallback
+                best_new_value = -float('inf')
+                
+                for alt_action in all_actions:
+                    alt_next = next_state(agent, alt_action)
+                    # Check if safe and leads to new state
+                    if (not obstacle or alt_next != obstacle) and alt_next not in visited_states:
+                        # Get Q-value for this action
+                        q_val = Q.get(state, {}).get(alt_action, 0.0)
+                        if q_val > best_new_value:
+                            best_new_value = q_val
+                            best_new_action = alt_action
+                
+                action = best_new_action
+            
+            # ANTI-STUCK: If action doesn't move agent (wall hit), force a move
+            if next_state(agent, action) == agent:
+                valid_moves = [a for a in ACTIONS if next_state(agent, a) != agent]
+                safe_moves = [a for a in valid_moves if not obstacle or next_state(agent, a) != obstacle]
+                
+                if safe_moves:
+                    # Pick safe move that reduces distance to goal
+                    best_move = min(safe_moves, 
+                                   key=lambda a: manhattan_distance(next_state(agent, a), GOAL))
+                    action = best_move
+                elif valid_moves:
+                    # Even if unsafe, need to move
+                    action = random.choice(valid_moves)
+        
         else:
-            if req.env == "dynamic":
-                action = safe_action(Q, state, agent, obstacle)
-            else:
-                action = best_action(Q, state)
+            # Static environment
+            action = best_action(Q, state)
+            next_pos = next_state(agent, action)
+            
+            # ANTI-LOOP for static
+            if next_pos in visited_states:
+                all_actions = list(ACTIONS)
+                random.shuffle(all_actions)
+                for alt_action in all_actions:
+                    alt_next = next_state(agent, alt_action)
+                    if alt_next not in visited_states and alt_next != agent:
+                        action = alt_action
+                        break
+            
+            # ANTI-STUCK for static
+            if next_state(agent, action) == agent:
+                valid_moves = [a for a in ACTIONS if next_state(agent, a) != agent]
+                if valid_moves:
+                    action = min(valid_moves, 
+                               key=lambda a: manhattan_distance(next_state(agent, a), GOAL))
 
+        # Calculate next position with chosen action
         next_pos = next_state(agent, action)
         
-        # ✅ FIX 3: CHECK FOR OBSTACLE COLLISION BEFORE MOVING
+        # ✅ Check for obstacle collision BEFORE moving
         if obstacle and next_pos == obstacle:
-            # Agent hit obstacle - don't move, record collision
             hit_obstacle = True
             action = f"{action} (💥 hit obstacle)"
             
-            # Add final step record showing collision
             path.append(StepRecord(
                 step=step + 1,
-                agent=list(agent),  # Stay at current position
+                agent=list(agent),
                 obstacle=list(obstacle),
                 action=action,
             ))
-            break  # End episode
+            break
         
-        # ✅ Move agent if safe
+        # ✅ Add current state to visited (anti-loop)
+        visited_states.add(agent)
+        
+        # ✅ Move agent
         agent = next_pos
 
         path.append(StepRecord(
@@ -282,9 +337,6 @@ def predict(req: PredictRequest):
             obstacle=list(obstacle) if obstacle else None,
             action=action,
         ))
-
-        # Debug log
-        logger.info(f"Step {step+1}: agent={agent}, action={action}, obstacle={obstacle}")
 
         if agent == GOAL:
             reached_goal = True
