@@ -1,9 +1,6 @@
 """
 Streamlit Demo App – RL Grid Navigation (Render-compatible)
-
-ANIMATION: Uses session_state + st.rerun() — one frame per script run.
-The run button fetches the full path from the API once, stores it in
-session_state, then each st.rerun() renders exactly one more frame.
+DEBUGGED VERSION - Fixed animation
 """
 
 import streamlit as st
@@ -19,7 +16,7 @@ API_URL = os.getenv("API_URL", "http://localhost:8000")
 
 GRID_SIZE = 6
 GOAL = (5, 5)
-DELAY = 0.3   # seconds between frames
+DELAY = 0.5   # Increased delay for visibility
 
 # ── Terrain ────────────────────────────────────────────────────────────────────
 TERRAIN_PRESETS = {
@@ -31,18 +28,34 @@ TERRAIN_PRESETS = {
 
 CELL = 72
 
-# ── Session state ──────────────────────────────────────────────────────────────
-for k, v in {
-    "animating":  False,
-    "frame":      0,
-    "path":       None,
-    "api_data":   None,
-    "extra_obs":  [],
-    "terrain":    {},
-    "visited":    set(),
-}.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
+# ── Initialize ALL session state variables ─────────────────────────────────
+def init_session_state():
+    if "animating" not in st.session_state:
+        st.session_state.animating = False
+    if "frame" not in st.session_state:
+        st.session_state.frame = 0
+    if "path" not in st.session_state:
+        st.session_state.path = None
+    if "api_data" not in st.session_state:
+        st.session_state.api_data = None
+    if "extra_obs" not in st.session_state:
+        st.session_state.extra_obs = []
+    if "terrain" not in st.session_state:
+        st.session_state.terrain = {}
+    if "visited" not in st.session_state:
+        st.session_state.visited = set()
+    if "agent_pos" not in st.session_state:
+        st.session_state.agent_pos = None
+    if "obstacles_pos" not in st.session_state:
+        st.session_state.obstacles_pos = set()
+    if "current_step_num" not in st.session_state:
+        st.session_state.current_step_num = 0
+    if "total_steps" not in st.session_state:
+        st.session_state.total_steps = 0
+    if "current_action" not in st.session_state:
+        st.session_state.current_action = ""
+
+init_session_state()
 
 # ── Grid renderer ──────────────────────────────────────────────────────────────
 def make_grid(agent, obstacles, visited, terrain):
@@ -51,7 +64,9 @@ def make_grid(agent, obstacles, visited, terrain):
         cells = []
         for c in range(GRID_SIZE):
             pos = (r, c)
-            if pos == GOAL:
+            if pos == GOAL and pos == agent:
+                bg, icon = "#43A047", "🏁🚀"
+            elif pos == GOAL:
                 bg, icon = "#43A047", "🏁"
             elif pos == agent:
                 bg, icon = "#1565C0", "🚀"
@@ -94,9 +109,12 @@ terrain_name  = st.sidebar.selectbox("Terrain", list(TERRAIN_PRESETS.keys()), ke
 terrain       = TERRAIN_PRESETS[terrain_name]
 num_obstacles = st.sidebar.slider("Obstacles", 1, 4, 2, key="n_obs")
 
-with st.sidebar.expander("🔧 Debug"):
-    st.code(f"API_URL={API_URL}")
-    st.write(f"frame={st.session_state.frame}, animating={st.session_state.animating}")
+with st.sidebar.expander("🔧 Debug Info"):
+    st.write(f"API_URL: {API_URL}")
+    st.write(f"Animating: {st.session_state.animating}")
+    st.write(f"Frame: {st.session_state.frame}")
+    st.write(f"Path length: {len(st.session_state.path) if st.session_state.path else 0}")
+    st.write(f"Current step: {st.session_state.current_step_num}/{st.session_state.total_steps}")
 
 # ── Header ─────────────────────────────────────────────────────────────────────
 st.title("🤖 RL Grid Navigation")
@@ -106,57 +124,93 @@ grid_ph   = st.empty()
 status_ph = st.empty()
 
 # ── Buttons ────────────────────────────────────────────────────────────────────
-btn_col1, btn_col2 = st.columns([1, 5])
+btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 4])
 run_btn  = btn_col1.button("▶ Run",  type="primary", disabled=st.session_state.animating)
 stop_btn = btn_col2.button("⏹ Stop", disabled=not st.session_state.animating)
+debug_btn = btn_col3.button("🔍 Debug State", disabled=st.session_state.animating)
+
+if debug_btn:
+    st.write("Current Session State:")
+    st.json({
+        "animating": st.session_state.animating,
+        "frame": st.session_state.frame,
+        "path_exists": st.session_state.path is not None,
+        "path_length": len(st.session_state.path) if st.session_state.path else 0,
+        "current_step": st.session_state.current_step_num,
+        "total_steps": st.session_state.total_steps,
+        "agent_pos": st.session_state.agent_pos,
+        "obstacles": list(st.session_state.obstacles_pos) if st.session_state.obstacles_pos else [],
+        "visited_count": len(st.session_state.visited),
+    })
 
 if stop_btn:
     st.session_state.animating = False
-    st.session_state.frame     = 0
-    st.session_state.path      = None
+    st.session_state.frame = 0
+    st.session_state.path = None
+    st.session_state.agent_pos = None
+    st.session_state.obstacles_pos = set()
+    st.session_state.visited = set()
+    st.session_state.current_step_num = 0
+    st.session_state.total_steps = 0
+    st.session_state.current_action = ""
     st.rerun()
 
 # ── Run: fetch full path once, store, kick off animation ───────────────────────
 if run_btn:
-    if (start_x, start_y) == GOAL:
+    start_pos = (start_x, start_y)
+    if start_pos == GOAL:
         st.error("❌ Start cannot equal goal")
         st.stop()
 
-    obstacles = generate_obstacles(num_obstacles, (start_x, start_y))
-    ox, oy    = obstacles[0]
+    obstacles = generate_obstacles(num_obstacles, start_pos)
+    ox, oy = obstacles[0]
 
     try:
-        with st.spinner("🔄 Fetching path…"):
+        with st.spinner("🔄 Fetching path from API..."):
             res = requests.post(
                 f"{API_URL}/predict",
                 json={
-                    "start_x":    start_x,
-                    "start_y":    start_y,
+                    "start_x": start_x,
+                    "start_y": start_y,
                     "obstacle_x": ox,
                     "obstacle_y": oy,
-                    "env":        env_choice,
+                    "env": env_choice,
                 },
                 timeout=30,
             )
             res.raise_for_status()
 
         data = res.json()
+        
+        # Debug: Show raw API response
+        with st.sidebar.expander("🔧 Raw API Response", expanded=False):
+            st.json(data)
 
-        if not data.get("path"):
-            st.error("❌ API returned empty path.")
+        path = data.get("path", [])
+        
+        if not path:
+            st.error(f"❌ API returned empty path. Response: {data}")
             st.stop()
 
-        st.session_state.path      = data["path"]
-        st.session_state.api_data  = data
+        # Store everything in session state
+        st.session_state.path = path
+        st.session_state.api_data = data
         st.session_state.extra_obs = [tuple(o) for o in obstacles[1:]]
-        st.session_state.terrain   = terrain
-        st.session_state.visited   = set()
-        st.session_state.frame     = 0
+        st.session_state.terrain = terrain
+        st.session_state.visited = set()
+        st.session_state.frame = 0
         st.session_state.animating = True
-        st.rerun()  # start animation immediately
+        st.session_state.agent_pos = start_pos
+        st.session_state.obstacles_pos = set()
+        st.session_state.current_step_num = 0
+        st.session_state.total_steps = len(path)
+        st.session_state.current_action = "starting"
+        
+        st.success(f"✅ Path loaded! {len(path)} steps")
+        st.rerun()  # Start animation
 
     except requests.exceptions.ConnectionError:
-        st.error(f"❌ Cannot connect to API at `{API_URL}`")
+        st.error(f"❌ Cannot connect to API at `{API_URL}`. Is the backend running?")
     except requests.exceptions.Timeout:
         st.error("❌ API timeout — service may be spun down (Render free tier)")
     except requests.exceptions.HTTPError as e:
@@ -165,79 +219,122 @@ if run_btn:
         st.error(f"❌ {type(e).__name__}: {e}")
 
 # ── Animation: one frame per rerun ────────────────────────────────────────────
-# ── Animation: one frame per rerun ────────────────────────────────────────────
 elif st.session_state.animating and st.session_state.path:
-    path  = st.session_state.path
+    path = st.session_state.path
     frame = st.session_state.frame
-
+    
     if frame < len(path):
-        step  = path[frame]
+        step = path[frame]
+        
+        # Extract current positions
         agent = tuple(step["agent"])
-        obs   = set()
-        if step.get("obstacle"):
-            obs.add(tuple(step["obstacle"]))
+        obstacle = step.get("obstacle")
+        
+        # Build obstacle set
+        obs = set()
+        if obstacle:
+            obs.add(tuple(obstacle))
         obs.update(st.session_state.extra_obs)
-
-        # Update visited set and add current agent position
+        
+        # Add previous position to visited (for trail)
         if frame > 0:
-            prev_step = path[frame-1]
+            prev_step = path[frame - 1]
             st.session_state.visited.add(tuple(prev_step["agent"]))
         
-        st.session_state.visited.add(agent)
-        trail = st.session_state.visited - {agent}
-
-        # Display current frame
+        # Update session state
+        st.session_state.agent_pos = agent
+        st.session_state.obstacles_pos = obs
+        st.session_state.current_step_num = frame + 1
+        st.session_state.current_action = step["action"]
+        
+        # Render current state
+        trail = st.session_state.visited - {agent}  # Don't show trail on agent
         grid_ph.markdown(
             make_grid(agent, obs, trail, st.session_state.terrain),
             unsafe_allow_html=True,
         )
+        
         status_ph.info(
-            f"Step **{frame + 1}** / {len(path)} — action: **{step['action']}**"
+            f"🚀 Step **{frame + 1}** / {len(path)}  |  "
+            f"Position: {agent}  |  "
+            f"Action: **{step['action']}**"
         )
-
-        # Advance frame counter
+        
+        # Show progress bar
+        progress = (frame + 1) / len(path)
+        st.progress(progress)
+        
+        # Advance frame
         st.session_state.frame += 1
         time.sleep(DELAY)
-        st.rerun()  # render next frame
-
+        st.rerun()
+    
     else:
-        # ── Done ──────────────────────────────────────────────────────────────
+        # ── Animation Complete ──────────────────────────────────────────────
         st.session_state.animating = False
-
-        data  = st.session_state.api_data
-        path  = st.session_state.path
-        last  = path[-1]
-        agent = tuple(last["agent"])
-        obs   = set()
-        if last.get("obstacle"):
-            obs.add(tuple(last["obstacle"]))
+        st.session_state.frame = 0
+        
+        data = st.session_state.api_data
+        path = st.session_state.path
+        
+        # Show final state
+        last_step = path[-1]
+        final_agent = tuple(last_step["agent"])
+        obs = set()
+        if last_step.get("obstacle"):
+            obs.add(tuple(last_step["obstacle"]))
         obs.update(st.session_state.extra_obs)
-
+        
+        st.session_state.visited.add(final_agent)
+        
         grid_ph.markdown(
-            make_grid(agent, obs, st.session_state.visited - {agent}, st.session_state.terrain),
+            make_grid(final_agent, obs, st.session_state.visited - {final_agent}, 
+                     st.session_state.terrain),
             unsafe_allow_html=True,
         )
-
-        st.markdown("### 📊 Agent Metrics")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Steps",   data["steps"])
-        c2.metric("Result",  "✅ Success" if data["success"] else "❌ Failed")
+        
+        # Metrics
+        st.markdown("---")
+        st.markdown("### 📊 Results")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Steps", data["steps"])
+        c2.metric("Result", "✅ Success" if data["success"] else "❌ Failed")
         c3.metric("Latency", f"{data['latency_ms']:.1f} ms")
-
+        c4.metric("Env", data["env"])
+        
         if data["hit_obstacle"]:
             status_ph.warning("💣 Hit obstacle!")
         elif data["success"]:
             st.balloons()
-            status_ph.success("🏆 Goal reached!")
+            status_ph.success("🏆 Goal reached successfully!")
         else:
             status_ph.error("❌ Failed to reach goal in 50 steps")
-
-        with st.expander("📋 Path Details"):
+        
+        with st.expander("📋 Full Path Details"):
+            st.write(f"Start: {data['start']} → Goal: {data['goal']}")
             for s in path:
-                st.text(f"Step {s['step']} → {s['agent']} ({s['action']})")
+                st.text(
+                    f"Step {s['step']:2d} | "
+                    f"Agent: ({s['agent'][0]},{s['agent'][1]}) | "
+                    f"Obstacle: {s.get('obstacle', 'N/A')} | "
+                    f"Action: {s['action']}"
+                )
+        
+        # Keep the animation state but allow new run
+        if st.button("🔄 Run Again", type="primary"):
+            st.session_state.animating = False
+            st.session_state.path = None
+            st.rerun()
 
-# ── Idle ──────────────────────────────────────────────────────────────────────
+# ── Idle state: show initial grid ─────────────────────────────────────────────
 else:
-    obs  = generate_obstacles(num_obstacles, (start_x, start_y))
-    html = make_grid((start_x, start_y), obs, set(), terrain)
+    # Reset animation state when idle
+    if not st.session_state.animating:
+        st.session_state.frame = 0
+        st.session_state.path = None
+        
+    obs_list = generate_obstacles(num_obstacles, (start_x, start_y))
+    obs_set = set(obs_list)
+    html = make_grid((start_x, start_y), obs_set, set(), terrain)
     grid_ph.markdown(html, unsafe_allow_html=True)
+    status_ph.info("👆 Configure settings and click **Run** to start the agent!")
