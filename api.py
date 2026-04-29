@@ -102,23 +102,53 @@ def move_obstacle(obstacle: tuple) -> tuple:
     return obstacle
 
 
-def best_action(Q: dict, state: tuple) -> str:
-    actions = Q.get(state, {a: 0.0 for a in ACTIONS})
-    return max(actions, key=actions.get)
-
-
-# ✅ NEW SAFE ACTION (added fix)
 def safe_action(Q: dict, state: tuple, agent: tuple, obstacle: Optional[tuple]) -> str:
+    """Get best action that doesn't hit obstacle AND actually moves the agent"""
     actions = Q.get(state, {a: 0.0 for a in ACTIONS})
-    sorted_actions = sorted(actions, key=actions.get, reverse=True)
-
-    for act in sorted_actions:
+    
+    if not actions or all(v == 0.0 for v in actions.values()):
+        # If all Q-values are zero, pick random safe action that moves
+        valid_moves = [a for a in ACTIONS if next_state(agent, a) != agent]
+        safe_moves = [a for a in valid_moves if not obstacle or next_state(agent, a) != obstacle]
+        if safe_moves:
+            return random.choice(safe_moves)
+        elif valid_moves:
+            return random.choice(valid_moves)
+        return random.choice(ACTIONS)
+    
+    # Sort actions by Q-value (highest first)
+    sorted_actions = sorted(actions.items(), key=lambda x: x[1], reverse=True)
+    
+    # First, try to find a safe action that actually moves
+    for act, _ in sorted_actions:
         next_pos = next_state(agent, act)
-        if not obstacle or next_pos != obstacle:
+        if next_pos != agent:  # Action actually moves the agent
+            if not obstacle or next_pos != obstacle:
+                return act
+    
+    # If no safe action moves, try any action that moves (even if unsafe)
+    for act, _ in sorted_actions:
+        if next_state(agent, act) != agent:
             return act
+    
+    # If really stuck, try any safe action
+    for act, _ in sorted_actions:
+        if not obstacle or next_state(agent, act) != obstacle:
+            return act
+    
+    # Last resort
+    return sorted_actions[0][0]
 
-    return sorted_actions[0]
 
+def best_action(Q: dict, state: tuple) -> str:
+    """Get best action, breaking ties randomly to avoid getting stuck"""
+    actions = Q.get(state, {a: 0.0 for a in ACTIONS})
+    if not actions or all(v == 0.0 for v in actions.values()):
+        # If all Q-values are zero (untrained), return a random action
+        return random.choice(ACTIONS)
+    max_val = max(actions.values())
+    best_actions = [a for a, v in actions.items() if v == max_val]
+    return random.choice(best_actions)
 
 # ── Models ────────────────────────────────────────────────────────────────────
 class PredictRequest(BaseModel):
@@ -212,11 +242,23 @@ def predict(req: PredictRequest):
         # state AFTER obstacle moves
         state = (agent, obstacle) if req.env == "dynamic" else agent
 
-        # ✅ FIX 2: safe action
-        if req.env == "dynamic":
-            action = safe_action(Q, state, agent, obstacle)
+        # ✅ FIX 2: Smarter action selection with exploration
+        import random
+        if random.random() < 0.1:  # 10% exploration
+            # Try random action that actually moves the agent
+            valid_moves = [a for a in ACTIONS if next_state(agent, a) != agent]
+            if valid_moves:
+                action = random.choice(valid_moves)
+            else:
+                action = random.choice(ACTIONS)
         else:
-            action = best_action(Q, state)
+            if req.env == "dynamic":
+                action = safe_action(Q, state, agent, obstacle)
+            else:
+                action = best_action(Q, state)
+
+        # Debug log to see what's happening
+        logger.info(f"Step {step+1}: agent={agent}, action={action}, next={next_state(agent, action)}, obstacle={obstacle}")
 
         agent = next_state(agent, action)
 
@@ -240,7 +282,7 @@ def predict(req: PredictRequest):
     _total_latency += latency_ms
 
     _drift_log.append({
-        "ts": datetime.utcnow().isoformat(),
+        "ts": datetime.now(timezone.utc).isoformat(),
         "env": req.env,
         "steps": len(path),
         "success": reached_goal,
@@ -260,9 +302,8 @@ def predict(req: PredictRequest):
         reached_goal=reached_goal,
         hit_obstacle=hit_obstacle,
         latency_ms=round(latency_ms, 2),
-        timestamp=datetime.utcnow().isoformat(),
+        timestamp=datetime.now(timezone.utc).isoformat(),
     )
-
 
 @app.get("/metrics")
 def metrics():
@@ -289,7 +330,24 @@ def model_info():
         "goal": str(GOAL),
         "actions": ACTIONS,
     }
-
+@app.get("/debug-state")
+def debug_state(x: int = 0, y: int = 0, ox: int = 2, oy: int = 2, env: str = "dynamic"):
+    """Debug: Show Q-values for a specific state"""
+    Q = Q_STATIC if env == "static" else Q_DYNAMIC
+    agent = (x, y)
+    obstacle = (ox, oy) if env == "dynamic" else None
+    state = (agent, obstacle) if env == "dynamic" else agent
+    
+    q_values = Q.get(state, {a: 0.0 for a in ACTIONS})
+    
+    return {
+        "agent": agent,
+        "obstacle": obstacle,
+        "state": state,
+        "q_values": q_values,
+        "best_action": max(q_values, key=q_values.get),
+        "total_states_in_table": len(Q),
+    }
 
 if __name__ == "__main__":
     import uvicorn
